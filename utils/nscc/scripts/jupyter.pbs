@@ -1,0 +1,17 @@
+#!/bin/bash
+#PBS -N jupyter
+#PBS -l select=1:ngpus=1:container_engine=enroot
+#PBS -l walltime=2:00:00
+#PBS -j oe
+
+cd $PBS_O_WORKDIR || exit $?
+
+# get a random port
+PORT=$(shuf -i8000-8999 -n1)
+
+echo -e "ssh -N -L $PORT:`hostname`:$PORT $USER@aspire2a.nus.edu.sg\n" >> sshtunnel.$PBS_JOBID
+
+enroot start --root $CONTAINER_NAME jupyter-lab \
+  --NotebookApp.allow_origin='*' \
+  --no-browser --ip=0.0.0.0 --port=$PORT \
+  >> sshtunnel.$PBS_JOBID 2> jupyter.$PBS_JOBID 
