@@ -1,12 +1,9 @@
-import os
 import pandas as pd
 from pathlib import Path
-from glob import glob
 from PIL import Image
 import numpy as np
-from torch.utils.data import Dataset
-import torchvision.transforms as T
 import matplotlib.pyplot as plt
+from PIL import Image
 import matplotlib.image as mpimg
 from collections import defaultdict
 import random
@@ -15,6 +12,7 @@ import seaborn as sns
 from torch.utils.data import Dataset
 import torchvision.transforms as T
 from glob import glob
+from torch.utils.data import DataLoader, WeightedRandomSampler
 import os
 
 def balanced_multilabel_split(df, train_size=20000, test_size=10000, seed=42):
@@ -165,7 +163,7 @@ def plot_class_balance(train_df, test_df):
     plt.show()
 
 class NIHDataset_modified(Dataset):
-    def __init__(self, df, root_dir, sizeimagesout):
+    def __init__(self, df, root_dir, sizeimagesout, train=True):
         self.sizeimagesout = sizeimagesout
         self.root_dir = root_dir
         df['Finding Labels'] = df['Finding Labels'].apply(lambda x: x.split('|') if isinstance(x, str) else x)
@@ -175,28 +173,39 @@ class NIHDataset_modified(Dataset):
         self.image_paths = [image_dict[name] for name in self.image_names]
         self.labels = df.set_index('Image Index').loc[self.image_names]['Finding Labels'].tolist()
         self.ages = df.set_index('Image Index').loc[self.image_names]['Patient Age'].tolist()
-        self.transform = T.Compose([
-                                      #transforms.RandomRotation(fnd(), expand=True),
-                                      T.RandomRotation(10, expand=True),
-                                      T.Resize(self.sizeimagesout),
-                                      T.RandomHorizontalFlip(),
-                                      T.RandomVerticalFlip(),
-                                      #transforms.ColorJitter(0.01),
-                                      #transforms.RandomAffine(10),
-                                      T.ToTensor()
-                                     ])
+        if train:
+            self.transform = T.Compose([
+                T.RandomRotation(10, expand=True),
+                T.RandomHorizontalFlip(),
+                T.RandomVerticalFlip(),
+                T.Resize(self.sizeimagesout),
+                T.ToTensor(),
+                T.Normalize(mean=[0.5], std=[0.5])
+            ])
+        else:
+            self.transform = T.Compose([
+                T.Resize(self.sizeimagesout),
+                T.ToTensor(),
+                T.Normalize(mean=[0.5], std=[0.5])
+            ])
+
 
     def __len__(self):
         return len(self.image_names)
+    
+    def __repr__(self):
+        return (f"NIHDataset_modified(num_samples={len(self)}, "
+                f"image_size={self.sizeimagesout}, "
+                f"path='{self.root_dir}')")
 
     def __getitem__(self, index):
         img_path = self.image_paths[index]
-        img = Image.open(img_path)
+        img = Image.open(img_path).convert("L")
         img = self.transform(img)
         return img, self.labels[index], self.ages[index]
     
 class NIHBinaryDataset(Dataset):
-    def __init__(self, df, root_dir, sizeimagesout):
+    def __init__(self, df, root_dir, sizeimagesout, train=True):
         self.df = df.reset_index(drop=True)
         self.root_dir = root_dir
         self.sizeimagesout = sizeimagesout
@@ -204,10 +213,25 @@ class NIHBinaryDataset(Dataset):
         # Make sure label is binary
         if 'binary_label' not in self.df.columns:
             self.df['binary_label'] = self.df['Finding Labels'].apply(lambda labels: 0 if labels == ['No Finding'] else 1)
-
+        
         # Map images to full paths
         self.image_paths = get_all_image_paths(root_dir)  # This should return {filename: full_path}
         self.df = self.df[self.df['Image Index'].isin(self.image_paths.keys())]
+        if train:
+            self.transform = T.Compose([
+                T.RandomRotation(10, expand=True),
+                T.RandomHorizontalFlip(),
+                T.RandomVerticalFlip(),
+                T.Resize(self.sizeimagesout),
+                T.ToTensor(),
+                T.Normalize(mean=[0.5], std=[0.5])
+            ])
+        else:
+            self.transform = T.Compose([
+                T.Resize(self.sizeimagesout),
+                T.ToTensor(),
+                T.Normalize(mean=[0.5], std=[0.5])
+            ])
 
         # Filter image paths accordingly
         self.df['full_path'] = self.df['Image Index'].map(self.image_paths)
@@ -215,23 +239,38 @@ class NIHBinaryDataset(Dataset):
     def __len__(self):
         return len(self.df)
 
+    def __repr__(self):
+        return (f"NIHBinaryDataset(num_samples={len(self)}, "
+                f"image_size={self.sizeimagesout}, "
+                f"path='{self.root_dir}')")
+
     def __getitem__(self, index):
         row = self.df.iloc[index]
-        image = Image.open(row['full_path']).convert("RGB")
+        image = Image.open(row['full_path']).convert("L")
         image = T.Resize(self.sizeimagesout)(image)
         label = row['binary_label']
         age = row['Patient Age']
 
         return image, label, age
 
+def save_dataset_stats(df, filename):
+    stats = {
+        'num_samples': len(df),
+        'mean_age': df['Patient Age'].mean(),
+        'min_age': df['Patient Age'].min(),
+        'max_age': df['Patient Age'].max(),
+        'label_distribution': df['binary_label'].value_counts().to_dict()
+    }
+    pd.Series(stats).to_json(filename, indent=4)
+
+
 if __name__ == "__main__":
-    df = pd.read_csv('Data_Entry_2017.csv')
+    root_dir = 'C:/Users/e1498134/Documents/Courses/CS5242/Project'
+    df = pd.read_csv(root_dir+'/Data_Entry_2017.csv')
     df = df[df['Patient Age'] <= 100].reset_index(drop=True)
     df['Finding Labels'] = df['Finding Labels'].str.split('|')
 
-    root_dir = 'C:/Users/e1498134/Documents/Courses/CS5242/Project'
     size_out = (256, 256)
-
 
     ## Dataset constitution:
     # training set = 20000 
@@ -243,17 +282,16 @@ if __name__ == "__main__":
     test_df = df[df['Image Index'].isin(test_ids)].reset_index(drop=True)
 
     train_dataset = NIHDataset_modified(train_df, root_dir, size_out)
-    test_dataset = NIHDataset_modified(test_df, root_dir, size_out)
+    test_dataset = NIHDataset_modified(test_df, root_dir, size_out, train=False)
 
     '''print("Train label distribution:")
     print(get_label_distribution(train_df))
     print("\nTest label distribution:")
+    plot_class_balance(train_df, test_df)'''
     print(get_label_distribution(test_df))
-    plot_class_balance(train_df, test_df)
-    img, label = train_dataset[0]
-    print(f"Image size: {img.size}, Number of labels: {len(label)}")
+    img, label, age = train_dataset[0]
     imgplot = plt.imshow(np.squeeze(img))
-    plt.show()'''
+    plt.show()
 
     ## Dataset constitution for Transformer: Label ∈ (Normal, Abnormal)
     # training set = 82800 
@@ -261,9 +299,30 @@ if __name__ == "__main__":
     # includes the age in the data (img, label, age)
 
     train_df_binary, test_df_binary = binary_balanced_split(df)
-    train_dataset = NIHBinaryDataset(train_df_binary, root_dir,size_out)
-    test_dataset = NIHBinaryDataset(test_df_binary, root_dir, size_out)
+    train_dataset_binary = NIHBinaryDataset(train_df_binary, root_dir,size_out)
+    test_dataset_binary = NIHBinaryDataset(test_df_binary, root_dir, size_out, train=False)
 
-    #print(f"Train set: {len(train_df_binary)} (Normal: {sum(train_df_binary['binary_label']==0)}, Abnormal: {sum(train_df_binary['binary_label']==1)})")
-    #print(f"Test set: {len(test_df_binary)} (Normal: {sum(test_df_binary['binary_label']==0)}, Abnormal: {sum(test_df_binary['binary_label']==1)})")
-    
+    print(f"Train set: {len(train_df_binary)} (Normal: {sum(train_df_binary['binary_label']==0)}, Abnormal: {sum(train_df_binary['binary_label']==1)})")
+    print(f"Test set: {len(test_df_binary)} (Normal: {sum(test_df_binary['binary_label']==0)}, Abnormal: {sum(test_df_binary['binary_label']==1)})")
+    img, label, age = train_dataset_binary[0]
+    imgplot = plt.imshow(np.squeeze(img))
+    plt.show()
+
+    ### Save train/test splits to CSV for reproducibility
+    # train_df_binary.to_csv("train_split_binary.csv", index=False)
+    #test_df_binary.to_csv("test_split_binary.csv", index=False)
+    #train_df.to_csv("train_split_multilabel.csv", index=False)
+    #test_df.to_csv("test_split_multilabel.csv", index=False)
+
+    ### Save dataset statistics:
+    #save_dataset_stats(train_df_binary, "train_binary_stats.json")
+    #save_dataset_stats(test_df_binary, "test_binary_stats.json")
+
+    ### Add a weighted sampler
+    # Compute weights
+    #class_counts = train_df_binary['binary_label'].value_counts().to_dict()
+    #weights = train_df_binary['binary_label'].map(lambda x: 1.0 / class_counts[x]).values
+    #sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
+    # DataLoader
+    #train_loader = DataLoader(train_dataset, sampler=sampler, batch_size=32)
+
