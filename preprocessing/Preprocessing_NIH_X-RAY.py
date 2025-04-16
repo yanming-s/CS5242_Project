@@ -56,7 +56,6 @@ def balanced_multilabel_split(df, train_size=20000, test_size=10000, seed=42):
         if len(train_images) >= train_size and len(test_images) >= test_size:
             break
 
-        # If we still need space, figure out how many to allocate
         remaining_train = train_size - len(train_images)
         remaining_test = test_size - len(test_images)
         available = min(n_total, remaining_train + remaining_test)
@@ -81,7 +80,7 @@ def balanced_multilabel_split(df, train_size=20000, test_size=10000, seed=42):
 
 def binary_balanced_split(df, train_ratio=0.8, seed=42):
     """
-    Manually split a balanced dataset into train and test without sklearn.
+    Manually split a balanced dataset into train and test.
     Returns train_df and test_df.
     """
     random.seed(seed)
@@ -126,7 +125,7 @@ def get_label_distribution(subset_df):
 def get_all_image_paths(root_dir):
     """
     Scans all `images_*/images/*.png` subfolders and returns a dictionary
-    mapping image filename to full path.
+    mapping image filename to full path. Fits to the structure of the dataset when downloaded
     """
     image_dict = {}
     # Match all folders like images_001, images_002, ..., images_012
@@ -154,7 +153,6 @@ def plot_class_balance(train_df, test_df):
     }
     balance_df = pd.DataFrame(data)
 
-    # Melt for seaborn
     melt_df = pd.melt(balance_df, id_vars='Class', value_vars=['Train', 'Test'],
                       var_name='Dataset', value_name='Image Count')
 
