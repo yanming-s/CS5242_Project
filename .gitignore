@@ -1,2 +1,5 @@
 # data files
 data/*
+
+# output files
+imgs/*

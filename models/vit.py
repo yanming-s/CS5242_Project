@@ -104,10 +104,10 @@ if __name__ == '__main__':
         "patch_size": 16,
         "in_channels": 3,
         "num_classes": 1000,
-        "embed_dim": 512,
-        "depth": 6,
-        "num_heads": 4,
-        "mlp_dim": 1024,
+        "embed_dim": 768,
+        "depth": 12,
+        "num_heads": 12,
+        "mlp_dim": 768 * 4,
         "dropout": 0.0
     }
     model = ViT(**model_args)
