@@ -3,7 +3,7 @@ import os.path as osp
 import random
 import pandas as pd
 import numpy as np
-from collections import defaultdict
+from collections import defaultdict, Counter
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import MultiLabelBinarizer
 from iterstrat.ml_stratifiers import MultilabelStratifiedShuffleSplit
@@ -73,6 +73,105 @@ def multilabel_split(df, train_size=20000, val_size=2500, test_size=2500, seed=4
     df_val  = df_tmp.iloc[v_i].reset_index(drop=True)
     df_test = df_tmp.iloc[te_i].reset_index(drop=True)
     return df_train, df_val, df_test
+
+
+def multilabel_rare_first_split(df, train_size=20000, val_size=2500, test_size=2500, seed=42):
+    """
+    Splits a multilabel dataset into train, validation, and test sets, prioritizing rare labels.
+
+    This function ensures that images containing rare labels are assigned to splits first, 
+    helping to maximize the representation of infrequent labels in all splits. The split 
+    sizes are specified by the user, and the function attempts to respect these sizes as 
+    closely as possible. If there are not enough images to fill the splits, the remaining 
+    slots are filled randomly from unused images.
+
+    Parameters:
+        df (pd.DataFrame): Input DataFrame with columns "Image Index" and "Finding Labels".
+                           "Finding Labels" should be a string of labels separated by '|'
+                           or a list of labels.
+        train_size (int): Number of images to include in the training set.
+        val_size (int): Number of images to include in the validation set.
+        test_size (int): Number of images to include in the test set.
+        seed (int): Random seed for reproducibility.
+
+    Returns:
+        tuple: (train_df, val_df, test_df)
+            train_df (pd.DataFrame): DataFrame containing the training split.
+            val_df (pd.DataFrame): DataFrame containing the validation split.
+            test_df (pd.DataFrame): DataFrame containing the test split.
+    """
+    random.seed(seed)
+    df = df[["Image Index", "Finding Labels"]].copy()
+    if isinstance(df['Finding Labels'].iloc[0], str):
+        df['Finding Labels'] = df['Finding Labels'].str.split('|')
+    # Count label frequencies
+    label_counter = Counter(label for labels in df['Finding Labels'] for label in labels)
+    sorted_labels = sorted(label_counter.items(), key=lambda x: x[1])  # rarest first
+    # Build mapping
+    image_labels = dict(zip(df['Image Index'], df['Finding Labels']))
+    label_to_images = defaultdict(set)
+    for img, labels in image_labels.items():
+        for label in labels:
+            label_to_images[label].add(img)
+    # Sets to track assignment
+    train_images = set()
+    val_images = set()
+    test_images = set()
+    used_images = set()
+    def add_image(img, split):
+        if img not in used_images:
+            if split == "train":
+                train_images.add(img)
+            elif split == "val":
+                val_images.add(img)
+            elif split == "test":
+                test_images.add(img)
+            used_images.add(img)
+    total_needed = train_size + val_size + test_size
+    for label, _ in sorted_labels:
+        candidate_images = list(label_to_images[label] - used_images)
+        random.shuffle(candidate_images)
+        n_total = len(candidate_images)
+        # Skip if we've hit capacity
+        if len(train_images) >= train_size and len(val_images) >= val_size and len(test_images) >= test_size:
+            break
+        remaining_train = train_size - len(train_images)
+        remaining_val = val_size - len(val_images)
+        remaining_test = test_size - len(test_images)
+        available = min(n_total, remaining_train + remaining_val + remaining_test)
+        if available == 0:
+            continue
+        n_train = int(available * (train_size / total_needed))
+        n_val = int(available * (val_size / total_needed))
+        n_test = available - n_train - n_val
+        # Adjust to stay within global limits
+        n_train = min(n_train, remaining_train)
+        n_val = min(n_val, remaining_val)
+        n_test = min(n_test, remaining_test)
+        idx = 0
+        for img in candidate_images[idx:idx + n_train]:
+            add_image(img, "train")
+        idx += n_train
+        for img in candidate_images[idx:idx + n_val]:
+            add_image(img, "val")
+        idx += n_val
+        for img in candidate_images[idx:idx + n_test]:
+            add_image(img, "test")
+    # If not enough images, fill randomly from unused
+    all_images = set(df["Image Index"])
+    unused_images = list(all_images - used_images)
+    random.shuffle(unused_images)
+    while len(train_images) < train_size and unused_images:
+        add_image(unused_images.pop(), "train")
+    while len(val_images) < val_size and unused_images:
+        add_image(unused_images.pop(), "val")
+    while len(test_images) < test_size and unused_images:
+        add_image(unused_images.pop(), "test")
+    # Build DataFrames
+    train_df = df[df["Image Index"].isin(train_images)].reset_index(drop=True)
+    val_df = df[df["Image Index"].isin(val_images)].reset_index(drop=True)
+    test_df = df[df["Image Index"].isin(test_images)].reset_index(drop=True)
+    return train_df, val_df, test_df
 
 
 def multilabel_balanced_split(df, train_size=20000, val_size=2500, test_size=2500, seed=42):
@@ -186,6 +285,9 @@ def binary_split(df, train_size=20000, test_normal_size=2500, test_abnormal_size
         ValueError: If there are not enough normal or abnormal samples to satisfy the requested split sizes.
     """
     random.seed(seed)
+    df = df[["Image Index", "Finding Labels"]].copy()
+    if isinstance(df["Finding Labels"].iloc[0], str):
+        df["Finding Labels"] = df["Finding Labels"].str.split('|')
     # Ensure 'binary_label' column exists
     if 'binary_label' not in df.columns:
         df['binary_label'] = df['Finding Labels'].apply(lambda labels: 0 if labels == ['No Finding'] else 1)
@@ -292,6 +394,9 @@ if __name__ == "__main__":
     # Split corrosponding to the original distribution
     train_df, val_df, test_df = multilabel_split(df)
     show_split_distribution(train_df, val_df, test_df, df, save_name="label_distribution.png")
+    # Split with rare-first distribution
+    train_df, val_df, test_df = multilabel_rare_first_split(df)
+    show_split_distribution(train_df, val_df, test_df, df, save_name="rare_first_label_distribution.png")
     # Split with balanced distribution
     train_df, val_df, test_df = multilabel_balanced_split(df)
     show_split_distribution(train_df, val_df, test_df, df, save_name="balanced_label_distribution.png")
