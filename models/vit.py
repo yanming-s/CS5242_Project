@@ -49,8 +49,18 @@ class Transformer_Layer(nn.Module):
 
 
 class ViT(nn.Module):
-    def __init__(self, img_size, patch_size, in_channels, num_classes,
-                 embed_dim, depth, num_heads, mlp_dim, dropout):
+    def __init__(
+            self,
+            img_size=224,
+            patch_size=16,
+            in_channels=1,
+            num_classes=15,
+            embed_dim=768,
+            depth=12,
+            num_heads=12,
+            mlp_dim=768*4,
+            dropout=0.0
+    ):
         super().__init__()
         self.patch_embed = Patch_Embedding(img_size, patch_size, in_channels, embed_dim)
         num_patches = self.patch_embed.num_patches
@@ -104,10 +114,10 @@ if __name__ == '__main__':
         "patch_size": 16,
         "in_channels": 3,
         "num_classes": 1000,
-        "embed_dim": 512,
-        "depth": 6,
-        "num_heads": 4,
-        "mlp_dim": 1024,
+        "embed_dim": 768,
+        "depth": 12,
+        "num_heads": 12,
+        "mlp_dim": 768 * 4,
         "dropout": 0.0
     }
     model = ViT(**model_args)

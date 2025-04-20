@@ -1,0 +1,14 @@
+# data files
+data/*
+data_tensor/*
+
+# pycache files
+dataset/__pycache__/*
+models/__pycache__/*
+
+# output files
+imgs/*
+logs/*
+
+# checkpoint files
+checkpoints/*
