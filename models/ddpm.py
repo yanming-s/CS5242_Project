@@ -1,316 +1,226 @@
 import torch
+import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
-from pytorch_lightning import LightningModule
-import numpy as np
-import os
-import os.path as osp
-from time import time
-import wandb
-
-from models.vit import Transformer_Layer, Patch_Embedding
 
 
-class ViT_Denoise_Net(nn.Module):
+class DoubleConv(nn.Module):
     """
-    Vision Transformer model to predict noise in DDPM
+    Double convolution block used in UNet
     """
-    def __init__(self, img_size, patch_size, in_channels, time_embed_dim,
-                 embed_dim, depth, num_heads, mlp_dim, dropout):
+    def __init__(self, in_channels, out_channels, mid_channels=None):
         super().__init__()
-        # Time embedding
-        self.time_embed = nn.Sequential(
-            nn.Linear(time_embed_dim, embed_dim),
+        if not mid_channels:
+            mid_channels = out_channels
+        self.double_conv = nn.Sequential(
+            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+    def forward(self, x):
+        return self.double_conv(x)
+
+
+class Down(nn.Module):
+    """
+    Downscaling with maxpool then double conv
+    """
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.maxpool_conv = nn.Sequential(
+            nn.MaxPool2d(2),
+            DoubleConv(in_channels, out_channels)
+        )
+    def forward(self, x):
+        return self.maxpool_conv(x)
+
+
+class Up(nn.Module):
+    """
+    Upscaling then double conv
+    """
+    def __init__(self, in_channels, out_channels, bilinear=True):
+        super().__init__()
+        if bilinear:
+            self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+            self.conv = DoubleConv(in_channels, out_channels, in_channels // 2)
+        else:
+            self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
+            self.conv = DoubleConv(in_channels, out_channels)
+    def forward(self, x1, x2):
+        x1 = self.up(x1)
+        diffY = x2.size()[2] - x1.size()[2]
+        diffX = x2.size()[3] - x1.size()[3]
+        x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
+                        diffY // 2, diffY - diffY // 2])
+        x = torch.cat([x2, x1], dim=1)
+        return self.conv(x)
+
+
+class SinusoidalPositionEmbeddings(nn.Module):
+    """
+    Time embedding for the UNet model
+    """
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+    def forward(self, time):
+        device = time.device
+        half_dim = self.dim // 2
+        embeddings = np.log(10000) / (half_dim - 1)
+        embeddings = torch.exp(torch.arange(half_dim, device=device) * -embeddings)
+        embeddings = time[:, None] * embeddings[None, :]
+        embeddings = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
+        return embeddings
+
+
+class UNet(nn.Module):
+    """
+    U-Net architecture for noise prediction in DDPM
+    """
+    def __init__(
+            self,
+            in_channels=1,
+            out_channels=1,
+            base_channels=64,
+            time_emb_dim=256
+    ):
+        super().__init__()
+        self.time_embedding = nn.Sequential(
+            SinusoidalPositionEmbeddings(time_emb_dim),
+            nn.Linear(time_emb_dim, time_emb_dim),
             nn.SiLU(),
-            nn.Linear(embed_dim, embed_dim),
+            nn.Linear(time_emb_dim, time_emb_dim),
         )
-        # Patch embedding
-        self.patch_embed = Patch_Embedding(img_size, patch_size, in_channels, embed_dim)
-        num_patches = self.patch_embed.num_patches
-        # Learnable positional embeddings for patches
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
-        self.pos_drop = nn.Dropout(dropout)
-        # Stack transformer encoder layers
-        self.transformer_layers = nn.ModuleList([
-            Transformer_Layer(embed_dim, num_heads, mlp_dim, dropout)
-            for _ in range(depth)
-        ])
-        self.norm = nn.LayerNorm(embed_dim)
-        # Output projection to predict noise
-        self.out_proj = nn.Sequential(
-            nn.Linear(embed_dim, patch_size * patch_size * in_channels),
-        )
-        # Image reconstruction parameters
-        self.img_size = img_size
-        self.patch_size = patch_size
-        self.in_channels = in_channels
-        self._init_weights()
-        
-    def _init_weights(self):
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
-        
-    def forward(self, x, t_emb):
-        # x: [bs, in_channels, img_size, img_size]
-        # t_emb: [bs, time_embed_dim]
-        bs = x.shape[0]
-        # Embed patches
-        x = self.patch_embed(x)  # [bs, num_patches, embed_dim]
-        # Process time embedding
-        time_emb = self.time_embed(t_emb)  # [bs, embed_dim]
-        time_emb = time_emb.unsqueeze(1)  # [bs, 1, embed_dim]
-        # Add positional embeddings and time embeddings
-        x = x + self.pos_embed
-        x = x + time_emb  # Broadcasting time embedding to all patches
-        x = self.pos_drop(x)
-        # Transformer expects shape [seq_length, batch_size, embed_dim]
-        x = x.transpose(0, 1)
-        for block in self.transformer_layers:
-            x = block(x)
-        x = self.norm(x)
-        # Back to [bs, num_patches, embed_dim]
-        x = x.transpose(0, 1)
-        # Project to noise prediction
-        patches = self.out_proj(x)  # [bs, num_patches, patch_size * patch_size * in_channels]
-        # Reshape to image
-        patches_side = self.img_size // self.patch_size
-        x = patches.view(bs, patches_side, patches_side, self.patch_size, self.patch_size, self.in_channels)
-        x = x.permute(0, 5, 1, 3, 2, 4).contiguous()
-        x = x.view(bs, self.in_channels, self.img_size, self.img_size)
-        return x
+        # Initial convolution
+        self.inc = DoubleConv(in_channels, base_channels)
+        # Downsampling path
+        self.down1 = Down(base_channels, base_channels*2)
+        self.down2 = Down(base_channels*2, base_channels*4)
+        self.down3 = Down(base_channels*4, base_channels*8)
+        self.down4 = Down(base_channels*8, base_channels*8)
+        # Time embeddings for different levels
+        self.time_mlp1 = nn.Linear(time_emb_dim, base_channels*2)
+        self.time_mlp2 = nn.Linear(time_emb_dim, base_channels*4)
+        self.time_mlp3 = nn.Linear(time_emb_dim, base_channels*8)
+        self.time_mlp4 = nn.Linear(time_emb_dim, base_channels*8)
+        # Upsampling path with skip connections
+        self.up1 = Up(base_channels*16, base_channels*4)
+        self.up2 = Up(base_channels*8, base_channels*2)
+        self.up3 = Up(base_channels*4, base_channels)
+        self.up4 = Up(base_channels*2, base_channels)
+        # Final convolution
+        self.outc = nn.Conv2d(base_channels, out_channels, kernel_size=1)
+    def forward(self, x, t):
+        # Time embedding
+        t_emb = self.time_embedding(t)
+        # Downsampling
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x2 = x2 + self.time_mlp1(t_emb)[:, :, None, None]
+        x3 = self.down2(x2)
+        x3 = x3 + self.time_mlp2(t_emb)[:, :, None, None]
+        x4 = self.down3(x3)
+        x4 = x4 + self.time_mlp3(t_emb)[:, :, None, None]
+        x5 = self.down4(x4)
+        x5 = x5 + self.time_mlp4(t_emb)[:, :, None, None]
+        # Upsampling with skip connections
+        x = self.up1(x5, x4)
+        x = self.up2(x, x3)
+        x = self.up3(x, x2)
+        x = self.up4(x, x1)
+        # Final convolution
+        logits = self.outc(x)
+        return logits
 
 
 class DDPM(nn.Module):
     """
-    Denoising Diffusion Probabilistic Model with Vision Transformer backbone
+    Denoising Diffusion Probabilistic Model
     """
-    def __init__(self, img_size=224, patch_size=16, in_channels=3, time_embed_dim=128,
-                 embed_dim=512, depth=6, num_heads=8, mlp_dim=512*4, dropout=0.0,
-                 timesteps=250, beta_schedule="linear"):
+    def __init__(
+        self,
+        model,
+        beta_start=1e-4,
+        beta_end=0.02,
+        num_timesteps=1000,
+        device="cuda" if torch.cuda.is_available() else "cpu"
+    ):
         super().__init__()
-        # Diffusion parameters
-        self.timesteps = timesteps
+        self.device = device
+        self.model = model.to(device)
+        self.num_timesteps = num_timesteps
         # Define beta schedule
-        if beta_schedule == "linear":
-            self.betas = torch.linspace(1e-4, 0.02, timesteps)
-        elif beta_schedule == "cosine":
-            steps = timesteps + 1
-            s = 0.008
-            x = torch.linspace(0, timesteps, steps)
-            alphas_cumprod = torch.cos(((x / timesteps) + s) / (1 + s) * np.pi * 0.5) ** 2
-            alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
-            betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
-            self.betas = torch.clip(betas, 0.0001, 0.9999)
-        else:
-            raise ValueError(f"Unknown beta schedule: {beta_schedule}")
-        # Pre-calculate diffusion parameters
+        self.betas = torch.linspace(beta_start, beta_end, num_timesteps, device=device)
+        # Pre-calculate different terms for closed form
         self.alphas = 1. - self.betas
         self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
-        self.alphas_cumprod_prev = F.pad(self.alphas_cumprod[:-1], (1, 0), value=1.)
+        self.alphas_cumprod_prev = F.pad(self.alphas_cumprod[:-1], (1, 0), value=1.0)
         # Calculations for diffusion q(x_t | x_{t-1}) and others
         self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
         self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - self.alphas_cumprod)
-        self.log_one_minus_alphas_cumprod = torch.log(1. - self.alphas_cumprod)
-        self.sqrt_recip_alphas_cumprod = torch.sqrt(1. / self.alphas_cumprod)
-        self.sqrt_recipm1_alphas_cumprod = torch.sqrt(1. / self.alphas_cumprod - 1)
+        self.sqrt_recip_alphas_cumprod = torch.sqrt(1.0 / self.alphas_cumprod)
+        self.sqrt_recipm1_alphas_cumprod = torch.sqrt(1.0 / self.alphas_cumprod - 1)
         # Calculations for posterior q(x_{t-1} | x_t, x_0)
         self.posterior_variance = self.betas * (1. - self.alphas_cumprod_prev) / (1. - self.alphas_cumprod)
-        self.posterior_log_variance_clipped = torch.log(
-            torch.cat([self.posterior_variance[1:2], self.posterior_variance[1:]])
-        )
-        self.posterior_mean_coef1 = (
-            self.betas * torch.sqrt(self.alphas_cumprod_prev) / (1. - self.alphas_cumprod)
-        )
-        self.posterior_mean_coef2 = (
-            (1. - self.alphas_cumprod_prev) * torch.sqrt(self.alphas) / (1. - self.alphas_cumprod)
-        )
-        # Time embedding
-        self.time_embed_dim = time_embed_dim
-        # Noise prediction network
-        self.noise_predictor = ViT_Denoise_Net(
-            img_size=img_size,
-            patch_size=patch_size,
-            in_channels=in_channels,
-            time_embed_dim=time_embed_dim,
-            embed_dim=embed_dim,
-            depth=depth,
-            num_heads=num_heads,
-            mlp_dim=mlp_dim,
-            dropout=dropout
-        )
-    
-    def get_time_embedding(self, t, device):
-        """
-        Create sinusoidal time embeddings
-        """
-        half_dim = self.time_embed_dim // 2
-        emb = torch.log(torch.tensor(10000.0)) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        emb = t.float()[:, None] * emb[None, :]
-        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
-        if self.time_embed_dim % 2 == 1:  # Zero pad if odd dimension
-            emb = F.pad(emb, (0, 1, 0, 0))
-        return emb
-    
-    def noising_process(self, x_0, t, noise=None):
+        
+    def forward_diffusion(self, x_0, t):
         """
         Forward diffusion process: q(x_t | x_0)
-        Sample from q(x_t | x_0) = N(sqrt(alpha_cumprod) * x_0, sqrt(1 - alpha_cumprod) * I)
+        Takes an image and a timestep as input and returns a noisy version of the image
+        """
+        noise = torch.randn_like(x_0)
+        mean = self.sqrt_alphas_cumprod[t][:, None, None, None] * x_0
+        variance = self.sqrt_one_minus_alphas_cumprod[t][:, None, None, None]
+        return mean + variance * noise, noise
+    
+    def sample_timesteps(self, n):
+        """
+        Sample timesteps uniformly for training
+        """
+        return torch.randint(low=1, high=self.num_timesteps, size=(n,), device=self.device)
+
+    def p_losses(self, x_0, t, noise=None):
+        """
+        Training loss calculation
         """
         if noise is None:
             noise = torch.randn_like(x_0)
-        sqrt_alphas_cumprod_t = self.sqrt_alphas_cumprod[t]
-        sqrt_one_minus_alphas_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t]
-        # Reshape for proper broadcasting
-        sqrt_alphas_cumprod_t = sqrt_alphas_cumprod_t.view(-1, 1, 1, 1)
-        sqrt_one_minus_alphas_cumprod_t = sqrt_one_minus_alphas_cumprod_t.view(-1, 1, 1, 1)
-        return sqrt_alphas_cumprod_t * x_0 + sqrt_one_minus_alphas_cumprod_t * noise, noise
-    
-    def p_sample(self, x_t, t, t_index):
-        """
-        Reverse diffusion sampling process for one timestep
-        Sample from p(x_{t-1} | x_t)
-        """
-        betas_t = self.betas[t]
-        sqrt_one_minus_alphas_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t]
-        sqrt_recip_alphas_t = torch.sqrt(1.0 / self.alphas[t])
-        # Use the model to predict the mean
-        t_emb = self.get_time_embedding(t, x_t.device)
-        predicted_noise = self.noise_predictor(x_t, t_emb)
-        # No noise when t == 0
-        if t_index == 0:
-            sqrt_recip_alphas_cumprod_t = self.sqrt_recip_alphas_cumprod[t].view(-1, 1, 1, 1)
-            sqrt_recipm1_alphas_cumprod_t = self.sqrt_recipm1_alphas_cumprod[t].view(-1, 1, 1, 1)
-            return sqrt_recip_alphas_cumprod_t * x_t - sqrt_recipm1_alphas_cumprod_t * predicted_noise
-        # Mean of the posterior
-        model_mean = sqrt_recip_alphas_t * (
-            x_t - betas_t * predicted_noise / sqrt_one_minus_alphas_cumprod_t
-        )
-        posterior_variance_t = self.posterior_variance[t]
-        noise = torch.randn_like(x_t)
-        return model_mean + torch.sqrt(posterior_variance_t) * noise
-    
-    def sample(self, batch_size, img_size, in_channels, device):
-        """
-        Generate samples
-        """
-        shape = (batch_size, in_channels, img_size, img_size)
-        img = torch.randn(shape, device=device)
-        imgs = []
-        for i in reversed(range(0, self.timesteps)):
-            t = torch.full((batch_size,), i, device=device, dtype=torch.long)
-            img = self.p_sample(img, t, i)
-            imgs.append(img.cpu().numpy())
-        return imgs
-    
-    def forward(self, x):
-        """
-        Forward pass of the DDPM model - training
-        Randomly sample a timestep t for each image in the batch
-        """
-        batch_size = x.shape[0]
-        device = x.device
-        # Sample a random timestep for each image
-        t = torch.randint(0, self.timesteps, (batch_size,), device=device).long()
-        # Generate random noise
-        noise = torch.randn_like(x)
-        # Forward diffusion process
-        x_noisy, target = self.noising_process(x, t, noise)
-        # Get time embeddings
-        t_emb = self.get_time_embedding(t, device)
-        # Predict noise using the ViT model
-        predicted_noise = self.noise_predictor(x_noisy, t_emb)
-        return predicted_noise, target
-
-
-class DDPM_Module(LightningModule):
-    """
-    PyTorch Lightning module for DDPM Training
-    """
-    def __init__(self, model: DDPM, train_loader, lr=5e-5, scheduler="plateau",
-                 save_ckpt=True, save_every_epoch=10, save_dir="checkpoints", max_grad_norm=1.0):
-        super().__init__()
-        # Module setup
-        self.model = model
-        self.train_loader = train_loader
-        # Learning settings
-        self.lr = lr
-        self.max_grad_norm = max_grad_norm
-        if scheduler not in ["cosine", "plateau"]:
-            raise ValueError(f"Invalid scheduler: {scheduler}. Must be 'cosine' or 'plateau'.")
-        self.scheduler = scheduler
-        # Save settings
-        self.save_dir = save_dir
-        if not osp.exists(save_dir):
-            os.makedirs(save_dir)
-        self.save_ckpt = save_ckpt
-        self.save_every_epoch = save_every_epoch
-        # Running loss
-        self.train_step_outputs = []
-        # Running time
-        self.epoch_start_time = None
-    
-    def train_dataloader(self):
-        return self.train_loader
-    
-    def training_step(self, batch, _):
-        x = batch
-        predicted_noise, target = self.model(x)
+        # Add noise to the input image according to the timestep
+        x_noisy, target = self.forward_diffusion(x_0, t)
+        # Predict the noise with the model
+        predicted_noise = self.model(x_noisy, t)
+        # Calculate the loss
         loss = F.mse_loss(predicted_noise, target)
-        self.train_step_outputs.append(loss)
         return loss
     
-    def on_train_epoch_start(self):
-        self.epoch_start_time = time()
-    
-    def on_train_epoch_end(self):
-        avg_loss = torch.stack(self.train_step_outputs).mean()
-        self.print(
-            f"Epoch {self.current_epoch + 1} / {self.trainer.max_epochs}"
-            f" - Train Loss: {avg_loss.item():.6f}"
-            f" - Time: {(time() - self.epoch_start_time) / 60:.2f} mins"
-        )
-        wandb.log({"train_loss": avg_loss.item()})
-        self.log("train_loss", avg_loss.item())
-        self.train_step_outputs.clear()
-        # Save model
-        if self.save_ckpt and (self.current_epoch + 1) % self.save_every_epoch == 0:
-            save_path = osp.join(self.save_dir, f"ddpm_epoch_{self.current_epoch + 1}.pth")
-            torch.save(self.model.state_dict(), save_path)
-    
-    def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=1e-5)
-        if self.scheduler == "cosine":
-            # Cosine annealing with warm restarts
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                optimizer,
-                T_0=10,
-                T_mult=2,
-                eta_min=1e-6,
-            )
-            return {
-                "optimizer": optimizer,
-                "lr_scheduler": {
-                    "scheduler": scheduler,
-                    "interval": "step",
-                },
-                "gradient_clip_val": self.max_grad_norm
-            }
-        else:
-            # Reduce on plateau
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer,
-                mode="min",
-                factor=0.5,
-                patience=5,
-                verbose=True
-            )
-            return {
-                "optimizer": optimizer,
-                "lr_scheduler": {
-                    "scheduler": scheduler,
-                    "monitor": "train_loss",
-                    "interval": "epoch",
-                    "frequency": 1,
-                },
-                "gradient_clip_val": self.max_grad_norm
-            }
+    def train_step(self, x, optimizer):
+        """
+        Perform a single training step
+        """
+        self.model.train()
+        optimizer.zero_grad()
+        # Sample random timesteps
+        batch_size = x.shape[0]
+        t = self.sample_timesteps(batch_size)
+        # Calculate loss
+        loss = self.p_losses(x, t)
+        # Backpropagation
+        loss.backward()
+        optimizer.step()
+        return loss.item()
+
+
+if __name__ == "__main__":
+    # Example usage
+    unet = UNet(in_channels=1, out_channels=1)
+    ddpm = DDPM(unet)
+    optimizer = torch.optim.Adam(ddpm.parameters(), lr=1e-4)
+    # Dummy input
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    x_0 = torch.randn(32, 1, 224, 224).to(device)
+    loss = ddpm.train_step(x_0, optimizer)
+    print(f"Training loss: {loss}")

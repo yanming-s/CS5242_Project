@@ -10,7 +10,7 @@ from time import time
 import warnings
 
 from models.vit import ViT
-from dataset.dataloader import get_multilabel_dataloader, get_binary_dataloader
+from dataset.dataloader import get_multilabel_dataloader
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -26,7 +26,7 @@ def train_one_epoch(model, loader, criterion, optimizer, max_grad_norm, device, 
         outputs = model(images)
         loss = criterion(outputs, targets)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         optimizer.step()
         running_loss += loss.item()
     duration = time() - start
