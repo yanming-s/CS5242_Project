@@ -59,7 +59,38 @@ def convert_img_to_tensor(split_df, image_dict, save_root, split_type):
         tensor_list.append(tensor)
     tensors = torch.stack(tensor_list)
     torch.save(tensors, osp.join(save_dir, "images.pt"))
-        
+
+
+def convert_label_to_tensor(split_df, label_dict, save_root, split_type):
+    """
+    Convert labels to tensor format and save them.
+    Args:
+        split_df (pd.DataFrame): DataFrame containing labels.
+        label_dict (dict): Dictionary mapping labels to indices.
+        save_root (str): Directory to save the converted tensors.
+        split_type (str): Type of split for the dataset.
+    """
+    save_dir = osp.join(save_root, split_type)
+    os.makedirs(save_dir, exist_ok=True)
+    lbl_series = split_df["Finding Labels"].tolist()
+    num_samples = len(lbl_series)
+    num_classes = len(label_dict)
+    if num_samples == 0:
+        # Deal with empty dataset
+        empty = torch.empty((0, num_classes), dtype=torch.float32)
+        torch.save(empty, osp.join(save_dir, "labels.pt"))
+        return
+    tensor_list = []
+    for lbls in tqdm(lbl_series, desc=f"Converting {split_type} labels"):
+        # Multi-hot encoding for multi-label classification
+        mh = torch.zeros(num_classes, dtype=torch.float32)
+        for l in lbls:
+            if l and l in label_dict:
+                mh[label_dict[l]] = 1.0
+        tensor_list.append(mh)
+    labels_tensor = torch.stack(tensor_list)
+    torch.save(labels_tensor, osp.join(save_dir, "labels.pt"))
+
 
 def main():
     # Parse command line arguments
@@ -100,10 +131,21 @@ def main():
         # Check whether the dataset has already been split
         if osp.exists(osp.join(save_dir, "train", "images.pt")):
             print("Dataset has already been split.")
-            return 
+            return
+        # Generate unified label dict from all Finding Labels
+        label_dict = None
+        all_labels = set()
+        for item in df["Finding Labels"].tolist():
+            lbls = item.split("|")
+            all_labels.update([l for l in lbls if l])
+        all_labels = sorted(all_labels)
+        label_dict = {label: idx for idx, label in enumerate(all_labels)}
         convert_img_to_tensor(train_df, image_dict, save_dir, "train")
+        convert_label_to_tensor(train_df, label_dict, save_dir, "train")
         convert_img_to_tensor(val_df, image_dict, save_dir, "val")
+        convert_label_to_tensor(val_df, label_dict, save_dir, "val")
         convert_img_to_tensor(test_df, image_dict, save_dir, "test")
+        convert_label_to_tensor(test_df, label_dict, save_dir, "test")
     else:
         from sample import binary_split
         train_df, test_normal_df, test_abnormal_df = binary_split(df)
