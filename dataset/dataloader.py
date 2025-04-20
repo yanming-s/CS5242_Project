@@ -1,4 +1,3 @@
-import os
 import os.path as osp
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -46,7 +45,7 @@ def get_multilabel_dataloader(
         root_dir,
         split_type="balanced",
         split="train",
-        batch_size=32,
+        batch_size=64,
         shuffle=True,
         num_workers=4
 ):
@@ -77,7 +76,7 @@ def get_binary_dataloader(
         root_dir,
         split_type="binary",
         split="train",
-        batch_size=32,
+        batch_size=64,
         shuffle=True,
         num_workers=4
 ):
