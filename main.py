@@ -59,7 +59,7 @@ def main():
     parser.add_argument("--ckpt_dir", type=str, default="checkpoints", help="Checkpoint directory")
     parser.add_argument("--save_every", type=int, default=10, help="Save checkpoint every N epochs")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
+    parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
     parser.add_argument("--lr", type=float, default=5e-5, help="Learning rate")
     parser.add_argument("--img_size", type=int, default=224, help="Input image size")
     parser.add_argument("--patch_size", type=int, default=16, help="Patch size")
@@ -73,7 +73,7 @@ def main():
     parser.add_argument("--index", type=int, default=0, help="GPU device ID")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--lazy", type=bool, default=True, help="Use lazy loading dataset")
-    parser.add_argument("--use_conv", type=bool, default=True, help="Use convolutional stem")
+    parser.add_argument("--use_pretrained", type=bool, default=True, help="Use pretrained model")
     args = parser.parse_args()
     # Set logging configuration
     log_dir = osp.join(
@@ -101,7 +101,7 @@ def main():
     if args.lazy:
         train_loader = get_lazy_dataloader(
             args.data_dir,
-            split_type="train",
+            split="train",
             chunk_size=args.batch_size,
             max_chunks_in_ram=25,
             batch_size=args.batch_size,
@@ -109,7 +109,7 @@ def main():
         )
         val_loader = get_lazy_dataloader(
             args.data_dir,
-            split_type="val",
+            split="val",
             chunk_size=args.batch_size,
             max_chunks_in_ram=25,
             batch_size=args.batch_size,
@@ -117,7 +117,7 @@ def main():
         )
         test_loader = get_lazy_dataloader(
             args.data_dir,
-            split_type="test",
+            split="test",
             chunk_size=args.batch_size,
             max_chunks_in_ram=25,
             batch_size=args.batch_size,
@@ -148,17 +148,19 @@ def main():
     if args.device == "cuda":
         device = torch.device(f"cuda:{args.index}")
         torch.cuda.set_device(args.index)
-    if args.use_conv:
-        model = ViTWithConvStem(
-            img_size=args.img_size,
-            in_channels=1,
-            num_classes=args.num_classes,
-            embed_dim=args.embed_dim,
-            depth=args.depth,
-            num_heads=args.num_heads,
-            mlp_dim=args.mlp_dim,
-            dropout=args.dropout
-        ).to(device)
+    if args.use_pretrained:
+        model_args = {
+            "img_size": 1024,
+            "in_channels": 1,
+            "num_classes": 15,
+            "embed_dim": 768,
+            "depth": 12,
+            "num_heads": 12,
+            "mlp_ratio": 4,
+            "dropout": 0.0,
+            "use_pretrained_blocks": True
+        }
+        model = ViTWithConvStem(**model_args).to(device)
     else:
         model = ViT(
             img_size=args.img_size,

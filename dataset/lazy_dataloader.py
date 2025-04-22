@@ -1,4 +1,5 @@
 import os
+import os.path as osp
 import re
 import glob
 import torch
@@ -6,9 +7,9 @@ from torch.utils.data import Dataset, DataLoader
 
 
 class LazyChunkDataset(Dataset):
-    def __init__(self, save_root, split_type, chunk_size=32, max_chunks_in_ram=25):
+    def __init__(self, save_root, split, chunk_size=32, max_chunks_in_ram=25):
         super().__init__()
-        self.save_dir = os.path.join(save_root, split_type)
+        self.save_dir = os.path.join(save_root, split)
         self.chunk_size = chunk_size
         self.max_chunks = max_chunks_in_ram
         # Get sorted list of chunk files
@@ -76,7 +77,8 @@ class LazyChunkDataset(Dataset):
 
 def get_lazy_dataloader(
         save_root,
-        split_type="train",
+        split_type="balanced",
+        split="train",
         chunk_size=32,
         max_chunks_in_ram=25,
         batch_size=32,
@@ -87,7 +89,8 @@ def get_lazy_dataloader(
     Get a DataLoader for the lazy chunked dataset.
     Args:
         save_root (str): Root directory where dataset chunks are stored.
-        split_type (str): Split name (train/val/test).
+        split_type (str): Split strategy (e.g., "balanced", "binary").
+        split (str): Split name (train/val/test).
         chunk_size (int): Size of each data chunk.
         max_chunks_in_ram (int): Maximum number of chunks to keep in memory.
         batch_size (int): Batch size for DataLoader.
@@ -96,9 +99,10 @@ def get_lazy_dataloader(
     Returns:
         DataLoader: DataLoader for the specified dataset split.
     """
+    data_dir = osp.join(save_root, split_type)
     dataset = LazyChunkDataset(
-        save_root=save_root,
-        split_type=split_type,
+        save_root=data_dir,
+        split=split,
         chunk_size=chunk_size,
         max_chunks_in_ram=max_chunks_in_ram,
     )
