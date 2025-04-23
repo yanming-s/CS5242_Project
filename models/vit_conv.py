@@ -155,10 +155,10 @@ class ViTWithConvStem(nn.Module):
 
 if __name__ == '__main__':
     # Create a dummy input image (batch size 1, 1 channel (grayscale), 1024x1024 pixels)
-    dummy_input = torch.randn(16, 1, 1024, 1024)
+    dummy_input = torch.randn(16, 1, 224, 224)
     # Instantiate the Vision Transformer with convolutional stem
     model_args = {
-        "img_size": 1024,
+        "img_size": 224,
         "in_channels": 1,  # Grayscale
         "num_classes": 15,
         "embed_dim": 768,

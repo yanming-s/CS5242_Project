@@ -9,7 +9,7 @@ from PIL import Image
 from tqdm import tqdm
 
 
-CHUNK_SIZE = 64
+CHUNK_SIZE = 32
 OUTPUT_SIZE = 1024
 T = transforms.Compose([
     transforms.Resize((OUTPUT_SIZE, OUTPUT_SIZE)),

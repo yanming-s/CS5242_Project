@@ -150,14 +150,14 @@ def main():
         torch.cuda.set_device(args.index)
     if args.use_pretrained:
         model_args = {
-            "img_size": 1024,
+            "img_size": args.img_size,
             "in_channels": 1,
-            "num_classes": 15,
-            "embed_dim": 768,
-            "depth": 12,
-            "num_heads": 12,
-            "mlp_ratio": 4,
-            "dropout": 0.0,
+            "num_classes": args.num_classes,
+            "embed_dim": args.embed_dim,
+            "depth": args.depth,
+            "num_heads": args.num_heads,
+            "mlp_ratio": args.mlp_dim // args.embed_dim,
+            "dropout": args.dropout,
             "use_pretrained_blocks": True
         }
         model = ViTWithConvStem(**model_args).to(device)
