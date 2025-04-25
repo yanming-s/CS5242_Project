@@ -10,7 +10,9 @@ from time import time
 import warnings
 
 from models.vit import ViT
+from models.vit_pre import ViT_Pre
 from dataset.dataloader import get_multilabel_dataloader
+from dataset.lazy_dataloader import get_lazy_dataloader
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -26,7 +28,7 @@ def train_one_epoch(model, loader, criterion, optimizer, max_grad_norm, device, 
         outputs = model(images)
         loss = criterion(outputs, targets)
         loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         optimizer.step()
         running_loss += loss.item()
     duration = time() - start
@@ -36,7 +38,7 @@ def train_one_epoch(model, loader, criterion, optimizer, max_grad_norm, device, 
 
 
 @torch.no_grad()
-def validate_and_test(model, loader, criterion, device, split):
+def validate(model, loader, criterion, device, split):
     model.eval()
     running_loss = 0.0
     for images, targets in loader:
@@ -50,26 +52,71 @@ def validate_and_test(model, loader, criterion, device, split):
     return avg_loss
 
 
+@torch.no_grad()
+def test(model, loader, device, label_dict_path):
+    """
+    Calculate overall accuracy and recall for the disease class,
+    using the 'No Finding' label bit to distinguish normal vs. abnormal.
+    """
+    model.eval()
+    # Load and parse label dictionary into a name→index map
+    with open(label_dict_path, "r") as f:
+        lines = f.read().splitlines()
+    label_to_idx = {}
+    for line in lines:
+        name, idx = line.split(":")
+        label_to_idx[name.strip()] = int(idx.strip())
+    # Get index of the 'No Finding' (normal) class
+    no_find_idx = label_to_idx["No Finding"]
+    # Prepare counters
+    total_samples = 0
+    correct_preds = 0
+    true_positive = 0    # correctly predicted diseased
+    false_negative = 0   # diseased samples predicted as normal
+    sigmoid = nn.Sigmoid()
+    for images, targets in loader:
+        images = images.to(device)
+        targets = targets.to(device)
+        # Model outputs logits for each class
+        outputs = model(images)
+        probs = sigmoid(outputs)
+        # Predicted normal if P(No Finding) >= 0.5
+        pred_normal = probs[:, no_find_idx] >= 0.5
+        # Ground-truth normal where target bit is 1
+        actual_normal = targets[:, no_find_idx] == 1
+        # Update accuracy count
+        correct_preds += (pred_normal == actual_normal).sum().item()
+        total_samples += targets.size(0)
+        # For disease (positive) samples (actual_normal == False)
+        disease_mask = ~actual_normal
+        # Predicted disease if not predicted normal
+        pred_disease = ~pred_normal
+        true_positive += (disease_mask & pred_disease).sum().item()
+        false_negative += (disease_mask & pred_normal).sum().item()
+    # Compute metrics
+    accuracy = correct_preds / total_samples if total_samples > 0 else 0.0
+    recall = (true_positive / (true_positive + false_negative)
+              if (true_positive + false_negative) > 0 else 0.0)
+    # Log results
+    logging.info(f"Test Accuracy: {accuracy * 100:.3f}")
+    logging.info(f"Disease Recall: {recall * 100:.3f}")
+
+
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Train ViT on multi-label classification")
-    parser.add_argument("--data_dir", type=str, default="data_tensor", help="Root tensor directory")
+    parser.add_argument("--img_size", type=int, default=224, help="Input image size")
     parser.add_argument("--ckpt_dir", type=str, default="checkpoints", help="Checkpoint directory")
+    parser.add_argument("--split_type", type=str, default="balanced", choices=["balanced", "rare_first", "original", "binary"], help="Split type for dataset")
     parser.add_argument("--save_every", type=int, default=10, help="Save checkpoint every N epochs")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
-    parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
-    parser.add_argument("--lr", type=float, default=5e-5, help="Learning rate")
-    parser.add_argument("--img_size", type=int, default=224, help="Input image size")
-    parser.add_argument("--patch_size", type=int, default=16, help="Patch size")
-    parser.add_argument("--embed_dim", type=int, default=768, help="Embedding dimension")
-    parser.add_argument("--depth", type=int, default=12, help="Transformer depth")
-    parser.add_argument("--num_heads", type=int, default=12, help="Number of attention heads")
-    parser.add_argument("--mlp_dim", type=int, default=768*4, help="MLP hidden dimension")
-    parser.add_argument("--dropout", type=float, default=0.0, help="Dropout rate")
-    parser.add_argument("--num_classes", type=int, default=15, help="Number of labels")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--index", type=int, default=0, help="GPU device ID")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--use_pretrained", action="store_true", help="Use pretrained model")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--test_only", action="store_true", help="Test only without training")
+    parser.add_argument("--ckpt_path", type=str, default=None, help="Absolute path to the checkpoint for testing")
     args = parser.parse_args()
     # Set logging configuration
     log_dir = osp.join(
@@ -79,7 +126,8 @@ def main():
     os.makedirs(log_dir, exist_ok=True)
     log_file = osp.join(
         log_dir,
-        f"vit-{datetime.now().strftime('%H-%M-%S')}.log"
+        f"vit{'-pretrained' if args.use_pretrained else ''}" + f"{'-test' if args.test_only else ''}" +\
+            f"-{args.split_type}-{datetime.now().strftime('%H-%M-%S')}.log"
     )
     logging.basicConfig(
         level=logging.INFO,
@@ -94,43 +142,100 @@ def main():
     # Get data loaders
     logging.info("Loading data...")
     torch.manual_seed(args.seed)
-    train_loader = get_multilabel_dataloader(
-        args.data_dir,
-        split="train",
-        batch_size=args.batch_size,
-        shuffle=True
-    )
-    val_loader = get_multilabel_dataloader(
-        args.data_dir,
-        split="val",
-        batch_size=args.batch_size,
-        shuffle=False
-    )
-    test_loader = get_multilabel_dataloader(
-        args.data_dir,
-        split="test",
-        batch_size=args.batch_size,
-        shuffle=False
-    )
+    if args.img_size == 224:
+        data_dir = "data_224"
+        if not os.path.exists(data_dir):
+            data_dir = "data_tensor"
+        train_loader = get_multilabel_dataloader(
+            data_dir,
+            split_type=args.split_type,
+            split="train",
+            batch_size=args.batch_size,
+            shuffle=True
+        )
+        val_loader = get_multilabel_dataloader(
+            data_dir,
+            split_type=args.split_type,
+            split="val",
+            batch_size=args.batch_size,
+            shuffle=False
+        )
+        test_loader = get_multilabel_dataloader(
+            data_dir,
+            split_type=args.split_type,
+            split="test",
+            batch_size=args.batch_size,
+            shuffle=False
+        )
+    elif args.img_size == 1024:
+        data_dir = "data_1024"
+        train_loader = get_lazy_dataloader(
+            data_dir,
+            split_type=args.split_type,
+            split="train",
+            chunk_size=32,
+            max_chunks_in_ram=25,
+            batch_size=args.batch_size,
+            shuffle=True
+        )
+        val_loader = get_lazy_dataloader(
+            data_dir,
+            split_type=args.split_type,
+            split="val",
+            chunk_size=32,
+            max_chunks_in_ram=25,
+            batch_size=args.batch_size,
+            shuffle=False
+        )
+        test_loader = get_lazy_dataloader(
+            data_dir,
+            split_type=args.split_type,
+            split="test",
+            chunk_size=32,
+            max_chunks_in_ram=25,
+            batch_size=args.batch_size,
+            shuffle=False
+        )
+    else:
+        raise ValueError("Invalid image size. Choose either 224 or 1024.")
+        
     # Initialize model, loss function, and optimizer
     logging.info("Initializing model...")
     device = torch.device(args.device)
     if args.device == "cuda":
         device = torch.device(f"cuda:{args.index}")
         torch.cuda.set_device(args.index)
-    model = ViT(
-        img_size=args.img_size,
-        patch_size=args.patch_size,
-        in_channels=1,
-        num_classes=args.num_classes,
-        embed_dim=args.embed_dim,
-        depth=args.depth,
-        num_heads=args.num_heads,
-        mlp_dim=args.mlp_dim,
-        dropout=args.dropout
-    ).to(device)
+    if args.use_pretrained:
+        model_args = {
+            "img_size": args.img_size,
+            "in_channels": 1,
+            "num_classes": 15,
+            "embed_dim": 768,
+            "depth": 12,
+            "num_heads": 12,
+            "mlp_ratio": 4.0,
+            "dropout": 0.0,
+            "use_pretrained_blocks": True
+        }
+        model = ViT_Pre(**model_args).to(device)
+    else:
+        model_args = {
+            "img_size": args.img_size,
+            "patch_size": 16,
+            "in_channels": 1,
+            "num_classes": 15,
+            "embed_dim": 768,
+            "depth": 12,
+            "num_heads": 12,
+            "mlp_dim": 768 * 4,
+            "dropout": 0.0
+        }
+        model = ViT(**model_args).to(device)
+    if args.ckpt_path:
+        model.load_state_dict(torch.load(args.ckpt_path))
+        logging.info(f"Loaded model from {args.ckpt_path}")
     criterion = nn.BCEWithLogitsLoss()
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = optim.Adam(model.parameters(), lr=5e-5, weight_decay=1e-4)
     max_grad_norm = 1.0
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
@@ -141,49 +246,66 @@ def main():
     )
     
     # Main training loop
-    logging.info("Starting training...")
-    best_val_loss = float("inf")
-    no_improve_epochs = 0
-    early_stop_patience = 5
-    ckpt_dir = osp.join(args.ckpt_dir, f"vit-{datetime.now().strftime('%Y-%m-%d')}")
-    os.makedirs(ckpt_dir, exist_ok=True)
-    for epoch in range(1, args.epochs + 1):
-        train_one_epoch(model, train_loader, criterion, optimizer, max_grad_norm, device, epoch)
-        # Gradually improve the gradient clipping threshold
-        if epoch > 10:
-            max_grad_norm = min(max_grad_norm + 0.1, 5.0)
+    if not args.test_only:
+        logging.info("Starting training...")
+        best_val_loss = float("inf")
+        no_improve_epochs = 0
+        early_stop_patience = 10
+        ckpt_dir = osp.join(args.ckpt_dir, f"vit{'-pretrained' if args.use_pretrained else ''}"+\
+                            f"-{args.split_type}-{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        for epoch in range(1, args.epochs + 1):
+            train_one_epoch(model, train_loader, criterion, optimizer, max_grad_norm, device, epoch)
+            # Gradually improve the gradient clipping threshold
+            if epoch > 10:
+                max_grad_norm = min(max_grad_norm + 0.1, 5.0)
 
-        val_loss = validate_and_test(model, val_loader, criterion, device, "val")
-        scheduler.step(val_loss)
-        # Early stopping if no improvement or learning rate is too low
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            no_improve_epochs = 0
-        else:
-            no_improve_epochs += 1
-        current_lr = optimizer.param_groups[0]['lr']
-        if no_improve_epochs >= early_stop_patience or current_lr < 1e-6:
-            logging.info(f"Early stopping triggered at epoch {epoch}.")
-            break
+            val_loss = validate(model, val_loader, criterion, device, "val")
+            scheduler.step(val_loss)
+            # Early stopping if no improvement or learning rate is too low
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                no_improve_epochs = 0
+                torch.save(
+                    model.state_dict(),
+                    osp.join(ckpt_dir, "best_model.pt")
+                )
+                logging.info(f"Best model saved at epoch {epoch} with val loss {val_loss:.4f}")
+            else:
+                no_improve_epochs += 1
+            current_lr = optimizer.param_groups[0]['lr']
+            if no_improve_epochs >= early_stop_patience or current_lr < 1e-6:
+                logging.info(f"Early stopping triggered at epoch {epoch}.")
+                break
 
-        # Periodic checkpoint saving
-        if epoch % args.save_every == 0:
-            torch.save(
-                model.state_dict(),
-                osp.join(ckpt_dir, f"checkpoint_epoch{epoch}.pt")
-            )
-            logging.info(f"Checkpoint saved at epoch {epoch}")
-    
+            # Periodic checkpoint saving
+            if epoch % args.save_every == 0:
+                torch.save(
+                    model.state_dict(),
+                    osp.join(ckpt_dir, f"checkpoint_epoch{epoch}.pt")
+                )
+                logging.info(f"Checkpoint saved at epoch {epoch}")
+        
+        # Save the final model
+        torch.save(
+            model.state_dict(),
+            osp.join(ckpt_dir, "final_model.pt")
+        )
+        logging.info("Final model saved.")
+
     # Testing
     logging.info("Testing...")
-    test_loss = validate_and_test(model, test_loader, criterion, device, "test")
-    logging.info(f"Final Test Loss: {test_loss:.4f}")
-    # Save the final model
-    torch.save(
-        model.state_dict(),
-        osp.join(ckpt_dir, "final_model.pt")
-    )
-    logging.info("Final model saved.")
+    # Load the best model for testing
+    if not args.test_only:
+        ckpt_path = osp.join(ckpt_dir, "best_model.pt")
+    else:
+        if args.ckpt_path is None:
+            raise ValueError("Please provide a checkpoint path for testing.")
+        ckpt_path = args.ckpt_path
+    model.load_state_dict(torch.load(ckpt_path))
+    logging.info(f"Loaded tested model from {ckpt_path}")
+    model.to(device)
+    test(model, test_loader, device, data_dir + "/label_dict.txt")
 
 
 if __name__ == "__main__":

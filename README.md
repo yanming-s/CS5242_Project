@@ -3,6 +3,15 @@
 This is the group project of Group 29 NUS CS5242 (AY2024/2025).
 
 
+## Model Testing
+
+You can only run the testing script only for a specific checkpoint file, following the command below:
+
+```bash
+python main_vit.py --test_only --ckpt_path <absolute/path/to/your/checkpoint_file>
+```
+
+
 ## Environment Setup
 
 1. Python environment setup
