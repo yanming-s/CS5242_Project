@@ -53,7 +53,7 @@ def validate(model, loader, criterion, device, split):
 
 
 @torch.no_grad()
-def test(model, loader, device, label_dict_path="data_224/label_dict.txt"):
+def test(model, loader, device, label_dict_path):
     """
     Calculate overall accuracy and recall for the disease class,
     using the 'No Finding' label bit to distinguish normal vs. abnormal.
@@ -98,8 +98,8 @@ def test(model, loader, device, label_dict_path="data_224/label_dict.txt"):
     recall = (true_positive / (true_positive + false_negative)
               if (true_positive + false_negative) > 0 else 0.0)
     # Log results
-    logging.info(f"Test Accuracy: {accuracy:.4f}")
-    logging.info(f"Disease Recall: {recall:.4f}")
+    logging.info(f"Test Accuracy: {accuracy * 100:.3f}")
+    logging.info(f"Disease Recall: {recall * 100:.3f}")
 
 
 def main():
@@ -115,6 +115,8 @@ def main():
     parser.add_argument("--index", type=int, default=0, help="GPU device ID")
     parser.add_argument("--use_pretrained", action="store_true", help="Use pretrained model")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--test_only", action="store_true", help="Test only without training")
+    parser.add_argument("--ckpt_path", type=str, default=None, help="Absolute path to the checkpoint for testing")
     args = parser.parse_args()
     # Set logging configuration
     log_dir = osp.join(
@@ -124,7 +126,8 @@ def main():
     os.makedirs(log_dir, exist_ok=True)
     log_file = osp.join(
         log_dir,
-        f"vit{'-pretrained' if args.use_pretrained else ''}-{args.split_type}-{datetime.now().strftime('%H-%M-%S')}.log"
+        f"vit{'-pretrained' if args.use_pretrained else ''}" + f"{'-test' if args.test_only else ''}" +\
+            f"-{args.split_type}-{datetime.now().strftime('%H-%M-%S')}.log"
     )
     logging.basicConfig(
         level=logging.INFO,
@@ -141,6 +144,8 @@ def main():
     torch.manual_seed(args.seed)
     if args.img_size == 224:
         data_dir = "data_224"
+        if not os.path.exists(data_dir):
+            data_dir = "data_tensor"
         train_loader = get_multilabel_dataloader(
             data_dir,
             split_type=args.split_type,
@@ -226,6 +231,9 @@ def main():
             "dropout": 0.0
         }
         model = ViT(**model_args).to(device)
+    if args.ckpt_path:
+        model.load_state_dict(torch.load(args.ckpt_path))
+        logging.info(f"Loaded model from {args.ckpt_path}")
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=5e-5, weight_decay=1e-4)
     max_grad_norm = 1.0
@@ -238,58 +246,66 @@ def main():
     )
     
     # Main training loop
-    logging.info("Starting training...")
-    best_val_loss = float("inf")
-    no_improve_epochs = 0
-    early_stop_patience = 10
-    ckpt_dir = osp.join(args.ckpt_dir, f"vit{'-pretrained' if args.use_pretrained else ''}"+\
-                        f"-{args.split_type}-{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}")
-    os.makedirs(ckpt_dir, exist_ok=True)
-    for epoch in range(1, args.epochs + 1):
-        train_one_epoch(model, train_loader, criterion, optimizer, max_grad_norm, device, epoch)
-        # Gradually improve the gradient clipping threshold
-        if epoch > 10:
-            max_grad_norm = min(max_grad_norm + 0.1, 5.0)
+    if not args.test_only:
+        logging.info("Starting training...")
+        best_val_loss = float("inf")
+        no_improve_epochs = 0
+        early_stop_patience = 10
+        ckpt_dir = osp.join(args.ckpt_dir, f"vit{'-pretrained' if args.use_pretrained else ''}"+\
+                            f"-{args.split_type}-{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        for epoch in range(1, args.epochs + 1):
+            train_one_epoch(model, train_loader, criterion, optimizer, max_grad_norm, device, epoch)
+            # Gradually improve the gradient clipping threshold
+            if epoch > 10:
+                max_grad_norm = min(max_grad_norm + 0.1, 5.0)
 
-        val_loss = validate(model, val_loader, criterion, device, "val")
-        scheduler.step(val_loss)
-        # Early stopping if no improvement or learning rate is too low
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            no_improve_epochs = 0
-            torch.save(
-                model.state_dict(),
-                osp.join(ckpt_dir, "best_model.pt")
-            )
-            logging.info(f"Best model saved at epoch {epoch} with val loss {val_loss:.4f}")
-        else:
-            no_improve_epochs += 1
-        current_lr = optimizer.param_groups[0]['lr']
-        if no_improve_epochs >= early_stop_patience or current_lr < 1e-6:
-            logging.info(f"Early stopping triggered at epoch {epoch}.")
-            break
+            val_loss = validate(model, val_loader, criterion, device, "val")
+            scheduler.step(val_loss)
+            # Early stopping if no improvement or learning rate is too low
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                no_improve_epochs = 0
+                torch.save(
+                    model.state_dict(),
+                    osp.join(ckpt_dir, "best_model.pt")
+                )
+                logging.info(f"Best model saved at epoch {epoch} with val loss {val_loss:.4f}")
+            else:
+                no_improve_epochs += 1
+            current_lr = optimizer.param_groups[0]['lr']
+            if no_improve_epochs >= early_stop_patience or current_lr < 1e-6:
+                logging.info(f"Early stopping triggered at epoch {epoch}.")
+                break
 
-        # Periodic checkpoint saving
-        if epoch % args.save_every == 0:
-            torch.save(
-                model.state_dict(),
-                osp.join(ckpt_dir, f"checkpoint_epoch{epoch}.pt")
-            )
-            logging.info(f"Checkpoint saved at epoch {epoch}")
-    
-    # Save the final model
-    torch.save(
-        model.state_dict(),
-        osp.join(ckpt_dir, "final_model.pt")
-    )
-    logging.info("Final model saved.")
+            # Periodic checkpoint saving
+            if epoch % args.save_every == 0:
+                torch.save(
+                    model.state_dict(),
+                    osp.join(ckpt_dir, f"checkpoint_epoch{epoch}.pt")
+                )
+                logging.info(f"Checkpoint saved at epoch {epoch}")
+        
+        # Save the final model
+        torch.save(
+            model.state_dict(),
+            osp.join(ckpt_dir, "final_model.pt")
+        )
+        logging.info("Final model saved.")
 
     # Testing
     logging.info("Testing...")
     # Load the best model for testing
-    model.load_state_dict(torch.load(osp.join(ckpt_dir, "best_model.pt")))
+    if not args.test_only:
+        ckpt_path = osp.join(ckpt_dir, "best_model.pt")
+    else:
+        if args.ckpt_path is None:
+            raise ValueError("Please provide a checkpoint path for testing.")
+        ckpt_path = args.ckpt_path
+    model.load_state_dict(torch.load(ckpt_path))
+    logging.info(f"Loaded tested model from {ckpt_path}")
     model.to(device)
-    test(model, test_loader, device, args.data_dir + "/label_dict.txt")
+    test(model, test_loader, device, data_dir + "/label_dict.txt")
 
 
 if __name__ == "__main__":
