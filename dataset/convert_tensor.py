@@ -10,12 +10,6 @@ from tqdm import tqdm
 
 
 CHUNK_SIZE = 32
-OUTPUT_SIZE = 1024
-T = transforms.Compose([
-    transforms.Resize((OUTPUT_SIZE, OUTPUT_SIZE)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.5], std=[0.5])
-])
 
 
 def collect_image_paths(root_dir):
@@ -45,17 +39,23 @@ def convert_img_to_tensor(split_df, image_dict, save_root, split_type):
         save_root (str): Directory to save the converted tensors.
         split_type (str): Type of split for the dataset.
     """
+    output_size = 224
     save_dir = osp.join(save_root, split_type)
     os.makedirs(save_dir, exist_ok=True)
     indices = split_df["Image Index"].values.tolist()
     if len(indices) == 0:
-        torch.save(torch.empty((0, 1, OUTPUT_SIZE, OUTPUT_SIZE)), osp.join(save_dir, "images.pt"))
+        torch.save(torch.empty((0, 1, output_size, output_size)), osp.join(save_dir, "images.pt"))
     tensor_list = []
+    transform = transforms.Compose([
+        transforms.Resize((output_size, output_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5], std=[0.5])
+    ])
     for i in tqdm(range(len(indices)), desc=f"Converting {split_type} images"):
         image = indices[i]
         path = image_dict[image]
         img = Image.open(path).convert("L")
-        tensor = T(img)
+        tensor = transform(img)
         tensor_list.append(tensor)
     tensors = torch.stack(tensor_list)
     torch.save(tensors, osp.join(save_dir, "images.pt"))
@@ -71,20 +71,26 @@ def convert_img_to_tensor_chunk(split_df, image_dict, save_root, split_type, chu
         split_type (str): Type of split for the dataset.
         chunk_size (int): Number of images per chunk.
     """
+    output_size = 1024
     save_dir = osp.join(save_root, split_type)
     os.makedirs(save_dir, exist_ok=True)
     indices = split_df["Image Index"].values.tolist()
     num_images = len(indices)
     if num_images == 0:
-        torch.save(torch.empty((0, 1, OUTPUT_SIZE, OUTPUT_SIZE)), osp.join(save_dir, "images_chunk_0.pt"))
+        torch.save(torch.empty((0, 1, output_size, output_size)), osp.join(save_dir, "images_chunk_0.pt"))
         return
+    transform = transforms.Compose([
+        transforms.Resize((output_size, output_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5], std=[0.5])
+    ])
     chunk = []
     chunk_idx = 0
     for i in tqdm(range(num_images), desc=f"Converting {split_type} images in chunks"):
         image = indices[i]
         path = image_dict[image]
         img = Image.open(path).convert("L")
-        tensor = T(img)
+        tensor = transform(img)
         chunk.append(tensor)
         if len(chunk) == chunk_size or i == num_images - 1:
             tensors = torch.stack(chunk)
@@ -177,15 +183,17 @@ def main():
     )
     parser.add_argument(
         "--use_chunk",
-        action=argparse.BooleanOptionalAction,
-        default=True,
+        action="store_true",
         help="Whether to use chunked tensor conversion (default: True)."
     )
     args = parser.parse_args()
     root_dir = args.root_dir
-    output_dir = args.output_dir
     split_type = args.split_type
     use_chunk = args.use_chunk
+    if not use_chunk:
+        output_dir = "data_224"
+    else:
+        output_dir = "data_1024"
     save_dir = os.path.join(output_dir, split_type)
     os.makedirs(save_dir, exist_ok=True)
     image_dict = collect_image_paths(root_dir)
@@ -213,6 +221,11 @@ def main():
             all_labels.update([l for l in lbls if l])
         all_labels = sorted(all_labels)
         label_dict = {label: idx for idx, label in enumerate(all_labels)}
+        # Save label dict to a file
+        label_dict_path = os.path.join(output_dir, "label_dict.txt")
+        with open(label_dict_path, "w") as f:
+            for label, idx in label_dict.items():
+                f.write(f"{label}: {idx}\n")
         if use_chunk:
             convert_img_to_tensor_chunk(train_df, image_dict, save_dir, "train", chunk_size=CHUNK_SIZE)
             convert_label_to_tensor_chunk(train_df, label_dict, save_dir, "train", chunk_size=CHUNK_SIZE)

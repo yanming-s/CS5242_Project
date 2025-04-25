@@ -42,7 +42,7 @@ class ConvolutionalStem(nn.Module):
         return x
 
 
-class ViTWithConvStem(nn.Module):
+class ViT_Pre(nn.Module):
     """
     Vision Transformer with a convolutional stem for high-resolution images
     """
@@ -168,7 +168,7 @@ if __name__ == '__main__':
         "dropout": 0.0,
         "use_pretrained_blocks": True  # Use pretrained ViT blocks
     }
-    model = ViTWithConvStem(**model_args)
+    model = ViT_Pre(**model_args)
     # Forward pass
     output = model(dummy_input)
     print("Output shape:", output.shape)  # [1, num_classes]
