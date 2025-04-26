@@ -1,9 +1,6 @@
-# Build an AlexNet model using Pytorch
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 
 class AlexNet(nn.Module):
     def __init__(self, in_channels, num_classes):
