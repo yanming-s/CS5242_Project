@@ -45,6 +45,7 @@ class LazyChunkDataset(Dataset):
         if chunk_idx < self.num_chunks - 1:
             pos = idx % self.chunk_size
         else:
+            chunk_idx = self.num_chunks - 1
             pos = idx - (self.num_chunks - 1) * self.chunk_size
         return chunk_idx, pos
 
