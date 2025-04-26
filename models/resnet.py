@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from enum import Enum
 
 
 class BasicBlock(nn.Module):
@@ -38,18 +39,20 @@ class BasicBlock(nn.Module):
 
 class ResNet(nn.Module):
 
-    variants = {
-        'resnet18': (BasicBlock, [2, 2, 2, 2]),
-        'resnet34': (BasicBlock, [3, 4, 6, 3])
+    class Variant(Enum):
+        RESNET18 = '18'
+        RESNET34 = '34'
+
+    _architectures = {
+        Variant.RESNET18: (BasicBlock, [2, 2, 2, 2]),
+        Variant.RESNET34: (BasicBlock, [3, 4, 6, 3])
     }
 
-    def __init__(self, in_channels, num_classes, variant='resnet18'):
+    def __init__(self, in_channels, num_classes, variant='18'):
         super(ResNet, self).__init__()
-
-        if variant not in self.variants:
-            raise ValueError(f"Unknown variant: {variant}")
-        block, layers = self.variants[variant]
-
+        if not isinstance(variant, self.Variant):
+            variant = self.Variant(variant)
+        block, layers = self._architectures[variant]
         self.in_channels = 64
         self.conv1 = nn.Conv2d(
             in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)

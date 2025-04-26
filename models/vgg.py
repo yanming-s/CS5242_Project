@@ -1,21 +1,56 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from enum import Enum
 
 
 class VGG(nn.Module):
 
-    default_architecture = [
-        64, 64, 'M',
-        128, 128, 'M',
-        256, 256, 256, 'M',
-        512, 512, 512, 'M',
-        512, 512, 512, 'M'
-    ]
+    class Variant(Enum):
+        VGG11 = '11'
+        VGG13 = '13'
+        VGG16 = '16'
+        VGG19 = '19'
 
-    def __init__(self, in_channels, num_classes, arch=default_architecture):
+    _architectures = {
+        Variant.VGG11: [
+            64, 'M',
+            128, 'M',
+            256, 256, 'M',
+            512, 512, 'M',
+            512, 512, 'M'
+        ],
+        Variant.VGG13: [
+            64, 64, 'M',
+            128, 128, 'M',
+            256, 256, 'M',
+            512, 512, 'M',
+            512, 512, 'M'
+        ],
+        Variant.VGG16: [
+            64, 64, 'M',
+            128, 128, 'M',
+            256, 256, 256, 'M',
+            512, 512, 512, 'M',
+            512, 512, 512, 'M'
+        ],
+        Variant.VGG19: [
+            64, 64, 'M',
+            128, 128, 'M',
+            256, 256, 256, 256, 'M',
+            512, 512, 512, 512, 'M',
+            512, 512, 512, 512, 'M'
+        ]
+    }
+
+    def __init__(self, in_channels, num_classes, variant='16'):
         super(VGG, self).__init__()
-        self.conv_layers = self._make_conv_layers(in_channels, arch)
+        if not isinstance(variant, self.Variant):
+            variant = self.Variant(variant)
+        self.conv_layers = self._make_conv_layers(
+            in_channels,
+            self._architectures[variant]
+        )
         self.fc_layers = nn.Sequential(
             nn.Linear(512 * 7 * 7, 4096),
             nn.ReLU(inplace=True),
