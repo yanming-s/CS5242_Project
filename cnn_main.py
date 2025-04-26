@@ -198,9 +198,9 @@ def main():
     elif args.model == 'vgg16':
         from models.vgg import VGG
         model = VGG(**model_args, variant='16').to(device)
-    elif args.model == 'resnet18' or 'resnet34':
+    elif args.model in ['resnet18', 'resnet34']:
         from models.resnet import ResNet
-        variant = args.model.split('resnet')[0]
+        variant = args.model.split('resnet')[1]
         model = ResNet(**model_args, variant=variant).to(device)
     elif args.model == 'vit_pt':
         from models.vit_pt import ViT_PT
